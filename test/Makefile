@@ -2,7 +2,7 @@
 
 MKMAN=no
 
-PROGS=srvtest cltest 
+PROGS=srvtest cltest
 SRCS.srvtest = srvtest.c
 SRCS.cltest = cltest.c
 CPPFLAGS+=-DBLDEBUG

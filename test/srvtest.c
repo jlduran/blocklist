@@ -35,7 +35,7 @@
 #include <sys/cdefs.h>
 __RCSID("$NetBSD: srvtest.c,v 1.9 2015/01/22 05:35:55 christos Exp $");
 
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -56,6 +56,10 @@ static void *b;
 
 #ifndef INFTIM
 #define INFTIM -1
+#endif
+
+#ifndef __arraycount
+#define __arraycount(a) (sizeof(a) / sizeof(a[0]))
 #endif
 
 static void
@@ -124,7 +128,7 @@ cr(int af, int type, in_port_t p)
 #ifdef HAVE_STRUCT_SOCKADDR_SA_LEN
 	ss.ss_len = (uint8_t)slen;
 #endif
-     
+
 	if (bind(sfd, (const void *)&ss, slen) == -1)
 		err(1, "bind");
 

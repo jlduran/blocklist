@@ -35,7 +35,7 @@
 #include <sys/cdefs.h>
 __RCSID("$NetBSD: cltest.c,v 1.5 2015/01/22 05:03:52 christos Exp $");
 
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -47,6 +47,11 @@ __RCSID("$NetBSD: cltest.c,v 1.5 2015/01/22 05:03:52 christos Exp $");
 #include <err.h>
 #ifdef HAVE_UTIL_H
 #include <util.h>
+#endif
+
+#ifndef HAVE_SOCKADDR_SNPRINTF
+struct sockaddr;
+int sockaddr_snprintf(char *, size_t, const char *, const struct sockaddr *);
 #endif
 
 static __dead void
