@@ -64,6 +64,7 @@ __RCSID("$NetBSD: blocklistd.c,v 1.15 2026/02/07 14:32:04 christos Exp $");
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
 
@@ -80,29 +81,25 @@ static const char *dbfile = _PATH_BLSTATE;
 static sig_atomic_t readconf;
 static sig_atomic_t done;
 static int vflag;
+static int signal_pipe[2];
 
 static void
-sigusr1(int n __unused)
+sig_handler(int sig)
 {
-	debug++;
-}
+	int serrno = errno;
+	char c = (char)sig;
 
-static void
-sigusr2(int n __unused)
-{
-	debug--;
-}
+	if (sig == SIGHUP)
+		readconf++;
+	if (sig == SIGINT || sig == SIGQUIT || sig == SIGTERM)
+		done++;
+	if (sig == SIGUSR1)
+		debug++;
+	if (sig == SIGUSR2)
+		debug--;
 
-static void
-sighup(int n __unused)
-{
-	readconf++;
-}
-
-static void
-sigdone(int n __unused)
-{
-	done++;
+	(void)write(signal_pipe[1], &c, 1);
+	errno = serrno;
 }
 
 static __dead void
@@ -114,6 +111,19 @@ usage(int c)
 	    "[-P <sockpathsfile>] [-C <controlprog>] [-D <dbfile>] "
 	    "[-s <sockpath>] [-t <timeout>]\n", getprogname());
 	exit(EXIT_FAILURE);
+}
+
+static void
+setup_signal_pipe(void)
+{
+	if (pipe(signal_pipe) == -1)
+		err(EXIT_FAILURE, "pipe");
+
+	for (int i = 0; i < 2; i++) {
+		int f = fcntl(signal_pipe[i], F_GETFL, 0);
+		if (fcntl(signal_pipe[i], F_SETFL, f | O_NONBLOCK) == -1)
+			err(EXIT_FAILURE, "fcntl");
+	}
 }
 
 static int
@@ -284,16 +294,15 @@ out:
 static void
 update_interfaces(void)
 {
-	struct ifaddrs *oifas, *nifas;
+	struct ifaddrs *nifas;
 
 	if (getifaddrs(&nifas) == -1)
 		return;
 
-	oifas = ifas;
-	ifas = nifas;
+	if (ifas)
+		freeifaddrs(ifas);
 
-	if (oifas)
-		freeifaddrs(oifas);
+	ifas = nifas;
 }
 
 static void
@@ -439,6 +448,12 @@ main(int argc, char *argv[])
 	restore = 0;
 	tout = 0;
 	flags = O_RDWR|O_EXCL|O_CLOEXEC;
+
+	if (pipe(signal_pipe) == -1)
+		err(EXIT_FAILURE, "pipe");
+	fcntl(signal_pipe[0], F_SETFL, fcntl(signal_pipe[0], F_GETFL) | O_NONBLOCK);
+	fcntl(signal_pipe[1], F_SETFL, fcntl(signal_pipe[1], F_GETFL) | O_NONBLOCK);
+
 	while ((c = getopt(argc, argv, "C:c:D:dfP:rR:s:t:v")) != -1) {
 		switch (c) {
 		case 'C':
@@ -493,12 +508,12 @@ main(int argc, char *argv[])
 	if (argc)
 		usage('?');
 
-	signal(SIGHUP, sighup);
-	signal(SIGINT, sigdone);
-	signal(SIGQUIT, sigdone);
-	signal(SIGTERM, sigdone);
-	signal(SIGUSR1, sigusr1);
-	signal(SIGUSR2, sigusr2);
+	signal(SIGHUP, sig_handler);
+	signal(SIGINT, sig_handler);
+	signal(SIGQUIT, sig_handler);
+	signal(SIGTERM, sig_handler);
+	signal(SIGUSR1, sig_handler);
+	signal(SIGUSR2, sig_handler);
 
 	openlog(getprogname(), LOG_PID, LOG_DAEMON);
 
@@ -541,9 +556,19 @@ main(int argc, char *argv[])
 	if (nfd == 0)
 		addfd(&pfd, &bl, &nfd, &maxfd, _PATH_BLSOCK);
 
+	if (nfd >= maxfd) {
+		maxfd++;
+		pfd = reallocarray(pfd, maxfd, sizeof(*pfd));
+		if (pfd == NULL)
+			err(EXIT_FAILURE, "malloc");
+	}
+	pfd[nfd].fd = signal_pipe[0];
+	pfd[nfd].events = POLLIN;
+	size_t sig_idx = nfd++;
+
 	state = state_open(dbfile, flags, 0600);
 	if (state == NULL)
-		state = state_open(dbfile,  flags | O_CREAT, 0600);
+		state = state_open(dbfile, flags | O_CREAT, 0600);
 	else {
 		if (restore) {
 			if (!flush)
@@ -562,28 +587,31 @@ main(int argc, char *argv[])
 	}
 
 	for (size_t t = 0; !done; t++) {
-		if (readconf) {
-			readconf = 0;
-			conf_parse(configfile);
-		}
 		ret = poll(pfd, (nfds_t)nfd, tout);
 		if (debug)
 			(*lfun)(LOG_DEBUG, "received %d from poll()", ret);
-		switch (ret) {
-		case -1:
+		if (ret == -1) {
 			if (errno == EINTR)
 				continue;
 			(*lfun)(LOG_ERR, "poll (%m)");
 			exit(EXIT_FAILURE);
-		case 0:
-			state_sync(state);
-			break;
-		default:
-			for (size_t i = 0; i < nfd; i++)
+		}
+		if (pfd[sig_idx].revents & POLLIN) {
+			char c;
+			while (read(signal_pipe[0], &c, 1) > 0);
+			if (readconf) {
+				readconf = 0;
+				conf_parse(configfile);
+			}
+			if (done)
+				break;
+		}
+		if (ret > 0) {
+			for (size_t i = 0; i < sig_idx; i++)
 				if (pfd[i].revents & POLLIN)
 					process(bl[i]);
 		}
-		if (t % 100 == 0)
+		if (ret == 0 || t % 100 == 0)
 			state_sync(state);
 		if (t % 10000 == 0)
 			update_interfaces();
